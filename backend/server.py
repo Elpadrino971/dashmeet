@@ -125,6 +125,11 @@ class GenerateReportRequest(BaseModel):
     include_all_participants: bool = True
     specific_emails: Optional[List[str]] = None
 
+class AssistantQueryRequest(BaseModel):
+    query: str
+    context: dict
+    use_web_search: bool = False
+
 # ==================== AUTH ENDPOINTS ====================
 
 @api_router.get("/auth/session")
@@ -606,13 +611,136 @@ async def get_reports(request: Request, meeting_id: Optional[str] = None):
 async def get_meeting_reports(meeting_id: str, request: Request):
     """Get all reports for a meeting (organizer only)"""
     user = await get_user_from_request(request)
-    
+
     meeting = await db.meetings.find_one({"meeting_id": meeting_id}, {"_id": 0})
     if not meeting or meeting.get("organizer_id") != user["user_id"]:
         raise HTTPException(status_code=403, detail="Not authorized")
-    
+
     reports = await db.reports.find({"meeting_id": meeting_id}, {"_id": 0}).to_list(100)
     return reports
+
+# ==================== AI ASSISTANT ====================
+
+@api_router.post("/assistant/query")
+async def assistant_query(query_request: AssistantQueryRequest, request: Request):
+    """AI assistant for live meeting support"""
+    user = await get_user_from_request(request)
+
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+    api_key = os.environ.get("EMERGENT_LLM_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI service not configured")
+
+    try:
+        context = query_request.context
+        query = query_request.query
+
+        # Build context prompt
+        context_parts = []
+
+        if context.get("meeting_title"):
+            context_parts.append(f"RÉUNION: {context['meeting_title']}")
+
+        if context.get("meeting_description"):
+            context_parts.append(f"Description: {context['meeting_description']}")
+
+        if context.get("agenda"):
+            agenda_text = "\n".join([
+                f"- {item.get('title', 'N/A')} ({item.get('duration', 0)} min) - Intervenant: {item.get('speaker', 'N/A')} - Statut: {item.get('status', 'N/A')}"
+                for item in context['agenda']
+            ])
+            context_parts.append(f"\nORDRE DU JOUR:\n{agenda_text}")
+
+        if context.get("current_item"):
+            current = context['current_item']
+            context_parts.append(f"\nSUJET EN COURS: {current.get('title', 'N/A')} - {current.get('description', '')}")
+
+        if context.get("meeting_notes"):
+            context_parts.append(f"\nNOTES DE RÉUNION:\n{context['meeting_notes']}")
+
+        if context.get("transcript"):
+            context_parts.append(f"\nTRANSCRIPTION AUDIO:\n{context['transcript'][:2000]}")  # Limit transcript length
+
+        if context.get("participants"):
+            context_parts.append(f"\nPARTICIPANTS: {', '.join(context['participants'])}")
+
+        context_str = "\n".join(context_parts)
+
+        # Web search if requested
+        web_results = []
+        if query_request.use_web_search:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as http_client:
+                    # Using DuckDuckGo instant answer API (free, no API key needed)
+                    search_response = await http_client.get(
+                        "https://api.duckduckgo.com/",
+                        params={"q": query, "format": "json", "no_html": 1}
+                    )
+                    if search_response.status_code == 200:
+                        data = search_response.json()
+                        if data.get("AbstractText"):
+                            web_results.append({
+                                "title": data.get("Heading", "DuckDuckGo Result"),
+                                "snippet": data.get("AbstractText"),
+                                "url": data.get("AbstractURL", "")
+                            })
+
+                        # Add related topics
+                        for topic in data.get("RelatedTopics", [])[:3]:
+                            if isinstance(topic, dict) and topic.get("Text"):
+                                web_results.append({
+                                    "title": topic.get("Text", "")[:100],
+                                    "snippet": topic.get("Text", ""),
+                                    "url": topic.get("FirstURL", "")
+                                })
+            except Exception as e:
+                logging.warning(f"Web search failed: {str(e)}")
+
+        # Build final prompt
+        if web_results:
+            web_context = "\n\nRÉSULTATS DE RECHERCHE WEB:\n" + "\n".join([
+                f"- {r['title']}: {r['snippet'][:200]} (Source: {r['url']})"
+                for r in web_results
+            ])
+            context_str += web_context
+
+        prompt = f"""Tu es un assistant IA pour une réunion en cours. Voici le contexte de la réunion:
+
+{context_str}
+
+QUESTION DE L'UTILISATEUR:
+{query}
+
+Instructions:
+- Réponds de manière concise et actionnable
+- Si des recherches web sont fournies, cite les sources
+- Suggère des actions concrètes si pertinent
+- Utilise un ton professionnel mais accessible
+- Réponds en français
+"""
+
+        # Call Claude
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"assistant_{user['user_id']}_{datetime.now().timestamp()}",
+            system_message="Tu es un assistant IA spécialisé dans la gestion de réunions professionnelles. Tu fournis des réponses claires, concises et actionnables en français."
+        ).with_model("anthropic", "claude-sonnet-4-5-20250929")
+
+        response_text = await chat.send_message(UserMessage(text=prompt))
+
+        # Format sources
+        sources = [{"title": r["title"], "url": r["url"]} for r in web_results if r.get("url")]
+
+        return {
+            "response": response_text,
+            "sources": sources,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+    except Exception as e:
+        logging.error(f"Assistant query error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error processing query")
 
 # ==================== EMAIL NOTIFICATIONS ====================
 

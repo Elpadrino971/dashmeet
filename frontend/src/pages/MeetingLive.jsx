@@ -7,9 +7,9 @@ import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
-import { 
-  ArrowLeft, 
-  Play, 
+import {
+  ArrowLeft,
+  Play,
   Pause,
   SkipForward,
   CheckCircle,
@@ -17,10 +17,15 @@ import {
   AlertTriangle,
   Users,
   FileText,
-  Timer
+  Timer,
+  Mic,
+  Sparkles
 } from 'lucide-react';
 import { CircularProgressbar, buildStyles } from 'react-circular-progressbar';
 import 'react-circular-progressbar/dist/styles.css';
+import LiveTranscription from '@/components/LiveTranscription';
+import MeetingAssistant from '@/components/MeetingAssistant';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 export default function MeetingLive() {
   const { id } = useParams();
@@ -28,6 +33,7 @@ export default function MeetingLive() {
   const [meeting, setMeeting] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notes, setNotes] = useState('');
+  const [transcript, setTranscript] = useState('');
   const [timerSeconds, setTimerSeconds] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
   const timerRef = useRef(null);
@@ -301,26 +307,58 @@ export default function MeetingLive() {
             </CardContent>
           </Card>
 
-          {/* Notes */}
-          <Card className="flex-1">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <FileText className="w-5 h-5 text-primary" />
-                Notes de réunion
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <Textarea
-                placeholder="Prenez des notes pendant la réunion... Les décisions, actions et points clés seront utilisés pour générer les rapports IA."
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                className="min-h-[300px] resize-none"
-                data-testid="meeting-notes-textarea"
-              />
-              <p className="text-xs text-muted-foreground mt-2">
-                Sauvegarde automatique toutes les 30 secondes
-              </p>
-            </CardContent>
+          {/* Tabs: Notes | Transcription | Assistant IA */}
+          <Card className="flex-1 flex flex-col">
+            <Tabs defaultValue="notes" className="flex-1 flex flex-col">
+              <CardHeader className="pb-3">
+                <TabsList className="grid w-full grid-cols-3">
+                  <TabsTrigger value="notes" className="text-xs sm:text-sm">
+                    <FileText className="w-4 h-4 mr-2" />
+                    Notes
+                  </TabsTrigger>
+                  <TabsTrigger value="transcription" className="text-xs sm:text-sm">
+                    <Mic className="w-4 h-4 mr-2" />
+                    Transcription
+                  </TabsTrigger>
+                  <TabsTrigger value="assistant" className="text-xs sm:text-sm">
+                    <Sparkles className="w-4 h-4 mr-2" />
+                    Assistant IA
+                  </TabsTrigger>
+                </TabsList>
+              </CardHeader>
+
+              <CardContent className="flex-1 overflow-hidden">
+                <TabsContent value="notes" className="h-full mt-0">
+                  <div className="h-full flex flex-col">
+                    <Textarea
+                      placeholder="Prenez des notes pendant la réunion... Les décisions, actions et points clés seront utilisés pour générer les rapports IA."
+                      value={notes}
+                      onChange={(e) => setNotes(e.target.value)}
+                      className="min-h-[400px] resize-none flex-1"
+                      data-testid="meeting-notes-textarea"
+                    />
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Sauvegarde automatique toutes les 30 secondes
+                    </p>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="transcription" className="h-full mt-0">
+                  <LiveTranscription
+                    meetingId={id}
+                    onTranscriptUpdate={(newTranscript) => {
+                      setTranscript(newTranscript);
+                      // Optionally update meeting notes with transcript
+                      setNotes(prev => prev ? `${prev}\n\n--- TRANSCRIPTION ---\n${newTranscript}` : newTranscript);
+                    }}
+                  />
+                </TabsContent>
+
+                <TabsContent value="assistant" className="h-full mt-0">
+                  <MeetingAssistant meeting={meeting} transcript={transcript} />
+                </TabsContent>
+              </CardContent>
+            </Tabs>
           </Card>
         </div>
       </div>
