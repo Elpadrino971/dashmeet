@@ -86,6 +86,11 @@ export const meetingsAPI = {
   updateNotes: async (id, notes) => {
     const res = await api.post(`/meetings/${id}/notes`, { notes });
     return res.data;
+  },
+
+  updateTranscript: async (id, transcript) => {
+    const res = await api.post(`/meetings/${id}/transcript`, { transcript });
+    return res.data;
   }
 };
 
@@ -109,6 +114,22 @@ export const tasksAPI = {
   
   delete: async (id) => {
     const res = await api.delete(`/tasks/${id}`);
+    return res.data;
+  },
+
+  getActivity: async (taskId) => {
+    const res = await api.get(`/tasks/${taskId}/activity`);
+    return res.data;
+  },
+
+  addComment: async (taskId, comment) => {
+    const res = await api.post(`/tasks/${taskId}/comment`, { comment });
+    return res.data;
+  },
+
+  getAnalytics: async (meetingId = null) => {
+    const params = meetingId ? { meeting_id: meetingId } : {};
+    const res = await api.get('/tasks/analytics/overview', { params });
     return res.data;
   }
 };

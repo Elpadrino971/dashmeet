@@ -36,6 +36,7 @@ export default function MeetingLive() {
   const [transcript, setTranscript] = useState('');
   const [timerSeconds, setTimerSeconds] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
+  const [lastSaved, setLastSaved] = useState(null);
   const timerRef = useRef(null);
 
   const currentItem = meeting?.agenda?.[meeting?.current_item_index || 0];
@@ -43,6 +44,12 @@ export default function MeetingLive() {
   const progress = Math.min((timerSeconds / itemDurationSeconds) * 100, 100);
   const isOvertime = timerSeconds > itemDurationSeconds;
   const remainingSeconds = Math.max(itemDurationSeconds - timerSeconds, 0);
+
+  // Warning states for timer
+  const warningThreshold = itemDurationSeconds - 120; // 2 min avant
+  const criticalThreshold = itemDurationSeconds - 60; // 1 min avant
+  const isWarning = timerSeconds >= warningThreshold && timerSeconds < criticalThreshold && !isOvertime;
+  const isCritical = timerSeconds >= criticalThreshold && !isOvertime;
 
   const formatTime = (seconds) => {
     const mins = Math.floor(Math.abs(seconds) / 60);
@@ -119,10 +126,19 @@ export default function MeetingLive() {
   const handleSaveNotes = useCallback(async () => {
     try {
       await meetingsAPI.updateNotes(id, notes);
+      setLastSaved(new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }));
     } catch (error) {
       console.error('Failed to save notes:', error);
     }
   }, [id, notes]);
+
+  const handleSaveTranscript = useCallback(async (transcriptText) => {
+    try {
+      await meetingsAPI.updateTranscript(id, transcriptText);
+    } catch (error) {
+      console.error('Failed to save transcript:', error);
+    }
+  }, [id]);
 
   // Auto-save notes every 30 seconds
   useEffect(() => {
@@ -173,14 +189,18 @@ export default function MeetingLive() {
         {/* Left Panel - Timer & Agenda */}
         <div className="lg:col-span-1 space-y-6 overflow-y-auto">
           {/* Timer */}
-          <Card className={`${isOvertime ? 'border-red-500 timer-glow' : ''}`}>
+          <Card className={`${
+            isOvertime ? 'border-red-500 timer-glow' :
+            isCritical ? 'border-orange-500' :
+            isWarning ? 'border-yellow-500' : ''
+          }`}>
             <CardContent className="pt-6">
               <div className="flex flex-col items-center">
                 <div className="w-48 h-48 relative">
                   <CircularProgressbar
                     value={isOvertime ? 100 : progress}
                     styles={buildStyles({
-                      pathColor: isOvertime ? '#ef4444' : '#f97316',
+                      pathColor: isOvertime ? '#ef4444' : isCritical ? '#f97316' : isWarning ? '#eab308' : '#10b981',
                       trailColor: 'hsl(var(--muted))',
                       strokeLinecap: 'round',
                     })}
@@ -199,6 +219,18 @@ export default function MeetingLive() {
                   <div className="flex items-center gap-2 mt-4 text-red-500">
                     <AlertTriangle className="w-4 h-4" />
                     <span className="text-sm font-medium">Temps dépassé !</span>
+                  </div>
+                )}
+                {isCritical && !isOvertime && (
+                  <div className="flex items-center gap-2 mt-4 text-orange-500">
+                    <Clock className="w-4 h-4" />
+                    <span className="text-sm font-medium">Moins d'1 minute !</span>
+                  </div>
+                )}
+                {isWarning && !isCritical && !isOvertime && (
+                  <div className="flex items-center gap-2 mt-4 text-yellow-500">
+                    <Clock className="w-4 h-4" />
+                    <span className="text-sm font-medium">Moins de 2 minutes</span>
                   </div>
                 )}
 
@@ -338,7 +370,7 @@ export default function MeetingLive() {
                       data-testid="meeting-notes-textarea"
                     />
                     <p className="text-xs text-muted-foreground mt-2">
-                      Sauvegarde automatique toutes les 30 secondes
+                      {lastSaved ? `Dernière sauvegarde : ${lastSaved}` : 'Sauvegarde automatique toutes les 30 secondes'}
                     </p>
                   </div>
                 </TabsContent>
@@ -348,14 +380,16 @@ export default function MeetingLive() {
                     meetingId={id}
                     onTranscriptUpdate={(newTranscript) => {
                       setTranscript(newTranscript);
-                      // Optionally update meeting notes with transcript
-                      setNotes(prev => prev ? `${prev}\n\n--- TRANSCRIPTION ---\n${newTranscript}` : newTranscript);
+                      handleSaveTranscript(newTranscript);
                     }}
                   />
                 </TabsContent>
 
                 <TabsContent value="assistant" className="h-full mt-0">
-                  <MeetingAssistant meeting={meeting} transcript={transcript} />
+                  <MeetingAssistant
+                    meeting={{...meeting, meeting_id: id}}
+                    transcript={transcript}
+                  />
                 </TabsContent>
               </CardContent>
             </Tabs>

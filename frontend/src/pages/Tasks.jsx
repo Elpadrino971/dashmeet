@@ -32,6 +32,9 @@ import {
 } from 'lucide-react';
 import { format, parseISO, isPast, isToday } from 'date-fns';
 import { fr } from 'date-fns/locale';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import TaskAnalytics from '@/components/TaskAnalytics';
+import { BarChart3, ListTodo } from 'lucide-react';
 
 export default function Tasks() {
   const [tasks, setTasks] = useState([]);
@@ -166,11 +169,25 @@ export default function Tasks() {
   return (
     <div className="space-y-6" data-testid="tasks-page">
       {/* Header */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Mes Tâches</h1>
-          <p className="text-muted-foreground">Gérez vos tâches assignées</p>
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Tâches & Analytics</h1>
+        <p className="text-muted-foreground">Gérez vos tâches et suivez votre efficacité</p>
+      </div>
+
+      <Tabs defaultValue="tasks" className="space-y-6">
+        <TabsList>
+          <TabsTrigger value="tasks">
+            <ListTodo className="w-4 h-4 mr-2" />
+            Mes Tâches
+          </TabsTrigger>
+          <TabsTrigger value="analytics">
+            <BarChart3 className="w-4 h-4 mr-2" />
+            Analytics
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="tasks" className="space-y-6">
+          <div className="flex items-center justify-end gap-4">
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>
             <Button data-testid="new-task-btn">
@@ -366,6 +383,12 @@ export default function Tasks() {
           )}
         </CardContent>
       </Card>
+        </TabsContent>
+
+        <TabsContent value="analytics">
+          <TaskAnalytics />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

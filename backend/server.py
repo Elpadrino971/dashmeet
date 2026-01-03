@@ -58,6 +58,23 @@ class Task(BaseModel):
     meeting_id: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None
+    created_by: Optional[str] = None  # user_id who created the task
+    started_at: Optional[datetime] = None  # when status changed to in_progress
+    estimated_hours: Optional[float] = None  # estimated time to complete
+    actual_hours: Optional[float] = None  # actual time spent
+
+class TaskActivity(BaseModel):
+    activity_id: str = Field(default_factory=lambda: f"act_{uuid.uuid4().hex[:8]}")
+    task_id: str
+    user_id: str
+    user_name: str
+    user_email: str
+    action: str  # created, updated, status_changed, commented, completed
+    field_changed: Optional[str] = None  # status, priority, assignee, etc.
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    comment: Optional[str] = None
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Meeting(BaseModel):
     meeting_id: str = Field(default_factory=lambda: f"mtg_{uuid.uuid4().hex[:8]}")
@@ -119,6 +136,12 @@ class TaskUpdate(BaseModel):
     status: Optional[str] = None
     priority: Optional[str] = None
     due_date: Optional[datetime] = None
+    estimated_hours: Optional[float] = None
+    actual_hours: Optional[float] = None
+
+class TaskCommentRequest(BaseModel):
+    task_id: str
+    comment: str
 
 class GenerateReportRequest(BaseModel):
     meeting_id: str
@@ -232,6 +255,33 @@ async def logout(request: Request, response: Response):
     
     response.delete_cookie("session_token")
     return {"message": "Logged out"}
+
+# ==================== HELPER: TASK ACTIVITY LOGGING ====================
+
+async def log_task_activity(
+    task_id: str,
+    user: dict,
+    action: str,
+    field_changed: Optional[str] = None,
+    old_value: Optional[str] = None,
+    new_value: Optional[str] = None,
+    comment: Optional[str] = None
+):
+    """Log task activity for tracking"""
+    activity = {
+        "activity_id": f"act_{uuid.uuid4().hex[:8]}",
+        "task_id": task_id,
+        "user_id": user["user_id"],
+        "user_name": user["name"],
+        "user_email": user["email"],
+        "action": action,
+        "field_changed": field_changed,
+        "old_value": old_value,
+        "new_value": new_value,
+        "comment": comment,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    await db.task_activities.insert_one(activity)
 
 # ==================== HELPER: GET USER ====================
 
@@ -420,13 +470,26 @@ async def update_meeting_notes(meeting_id: str, request: Request):
     """Update meeting notes"""
     user = await get_user_from_request(request)
     body = await request.json()
-    
+
     await db.meetings.update_one(
         {"meeting_id": meeting_id},
         {"$set": {"meeting_notes": body.get("notes", "")}}
     )
-    
+
     return {"message": "Notes updated"}
+
+@api_router.post("/meetings/{meeting_id}/transcript")
+async def update_meeting_transcript(meeting_id: str, request: Request):
+    """Update meeting transcript"""
+    user = await get_user_from_request(request)
+    body = await request.json()
+
+    await db.meetings.update_one(
+        {"meeting_id": meeting_id},
+        {"$set": {"meeting_transcript": body.get("transcript", "")}}
+    )
+
+    return {"message": "Transcript updated"}
 
 # ==================== TASKS ENDPOINTS ====================
 
@@ -446,7 +509,7 @@ async def get_tasks(request: Request, meeting_id: Optional[str] = None):
 async def create_task(task_data: TaskCreate, request: Request):
     """Create a new task"""
     user = await get_user_from_request(request)
-    
+
     task = Task(
         title=task_data.title,
         description=task_data.description,
@@ -454,42 +517,207 @@ async def create_task(task_data: TaskCreate, request: Request):
         assignee_name=task_data.assignee_name,
         due_date=task_data.due_date,
         priority=task_data.priority,
-        meeting_id=task_data.meeting_id
+        meeting_id=task_data.meeting_id,
+        created_by=user["user_id"]
     )
-    
+
     task_dict = task.model_dump()
     task_dict["created_at"] = task_dict["created_at"].isoformat()
     if task_dict.get("due_date"):
         task_dict["due_date"] = task_dict["due_date"].isoformat()
-    
+
     await db.tasks.insert_one(task_dict)
-    
+
+    # Log activity
+    await log_task_activity(
+        task_id=task.task_id,
+        user=user,
+        action="created",
+        new_value=f"Tâche créée: {task.title}"
+    )
+
     return {"task_id": task.task_id, "message": "Task created"}
 
 @api_router.put("/tasks/{task_id}")
 async def update_task(task_id: str, task_data: TaskUpdate, request: Request):
     """Update a task"""
     user = await get_user_from_request(request)
-    
+
+    # Get current task state for comparison
+    current_task = await db.tasks.find_one({"task_id": task_id}, {"_id": 0})
+    if not current_task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
     update_data = {k: v for k, v in task_data.model_dump().items() if v is not None}
-    
-    if update_data.get("status") == "completed":
-        update_data["completed_at"] = datetime.now(timezone.utc).isoformat()
-    
+
+    # Track status changes
+    if "status" in update_data:
+        old_status = current_task.get("status")
+        new_status = update_data["status"]
+
+        if new_status == "in_progress" and old_status != "in_progress":
+            update_data["started_at"] = datetime.now(timezone.utc).isoformat()
+
+        if new_status == "completed" and old_status != "completed":
+            update_data["completed_at"] = datetime.now(timezone.utc).isoformat()
+
+            # Calculate actual hours if started_at exists
+            if current_task.get("started_at"):
+                started = datetime.fromisoformat(current_task["started_at"].replace('Z', '+00:00'))
+                completed = datetime.now(timezone.utc)
+                hours = (completed - started).total_seconds() / 3600
+                update_data["actual_hours"] = round(hours, 2)
+
+        # Log status change
+        await log_task_activity(
+            task_id=task_id,
+            user=user,
+            action="status_changed",
+            field_changed="status",
+            old_value=old_status,
+            new_value=new_status
+        )
+
+    # Log other field changes
+    for field in ["priority", "assignee_email", "title"]:
+        if field in update_data and update_data[field] != current_task.get(field):
+            await log_task_activity(
+                task_id=task_id,
+                user=user,
+                action="updated",
+                field_changed=field,
+                old_value=str(current_task.get(field)),
+                new_value=str(update_data[field])
+            )
+
     if "due_date" in update_data and update_data["due_date"]:
         update_data["due_date"] = update_data["due_date"].isoformat()
-    
+
     await db.tasks.update_one({"task_id": task_id}, {"$set": update_data})
-    
+
     return {"message": "Task updated"}
 
 @api_router.delete("/tasks/{task_id}")
 async def delete_task(task_id: str, request: Request):
     """Delete a task"""
     user = await get_user_from_request(request)
-    
+
     await db.tasks.delete_one({"task_id": task_id})
+
+    # Log deletion
+    await log_task_activity(
+        task_id=task_id,
+        user=user,
+        action="deleted"
+    )
+
     return {"message": "Task deleted"}
+
+@api_router.get("/tasks/{task_id}/activity")
+async def get_task_activity(task_id: str, request: Request):
+    """Get activity history for a task"""
+    user = await get_user_from_request(request)
+
+    activities = await db.task_activities.find(
+        {"task_id": task_id},
+        {"_id": 0}
+    ).sort("timestamp", -1).to_list(100)
+
+    return activities
+
+@api_router.post("/tasks/{task_id}/comment")
+async def add_task_comment(task_id: str, request: Request):
+    """Add a comment to a task"""
+    user = await get_user_from_request(request)
+    body = await request.json()
+
+    comment = body.get("comment", "")
+    if not comment:
+        raise HTTPException(status_code=400, detail="Comment cannot be empty")
+
+    # Log comment
+    await log_task_activity(
+        task_id=task_id,
+        user=user,
+        action="commented",
+        comment=comment
+    )
+
+    return {"message": "Comment added"}
+
+@api_router.get("/tasks/analytics/overview")
+async def get_tasks_analytics(request: Request, meeting_id: Optional[str] = None):
+    """Get tasks analytics and efficiency metrics"""
+    user = await get_user_from_request(request)
+
+    # Build query
+    query = {"assignee_email": user["email"]}
+    if meeting_id:
+        query["meeting_id"] = meeting_id
+
+    # Get all tasks
+    all_tasks = await db.tasks.find(query, {"_id": 0}).to_list(1000)
+
+    # Calculate metrics
+    total_tasks = len(all_tasks)
+    completed_tasks = [t for t in all_tasks if t.get("status") == "completed"]
+    in_progress_tasks = [t for t in all_tasks if t.get("status") == "in_progress"]
+    pending_tasks = [t for t in all_tasks if t.get("status") == "pending"]
+
+    # Completion rate
+    completion_rate = (len(completed_tasks) / total_tasks * 100) if total_tasks > 0 else 0
+
+    # Average completion time (in hours)
+    completion_times = []
+    for task in completed_tasks:
+        if task.get("started_at") and task.get("completed_at"):
+            started = datetime.fromisoformat(task["started_at"].replace('Z', '+00:00'))
+            completed = datetime.fromisoformat(task["completed_at"].replace('Z', '+00:00'))
+            hours = (completed - started).total_seconds() / 3600
+            completion_times.append(hours)
+
+    avg_completion_time = sum(completion_times) / len(completion_times) if completion_times else 0
+
+    # Overdue tasks
+    now = datetime.now(timezone.utc)
+    overdue_tasks = []
+    for task in all_tasks:
+        if task.get("status") != "completed" and task.get("due_date"):
+            due = datetime.fromisoformat(task["due_date"].replace('Z', '+00:00'))
+            if due < now:
+                overdue_tasks.append(task)
+
+    # Priority breakdown
+    priority_breakdown = {
+        "high": len([t for t in all_tasks if t.get("priority") == "high"]),
+        "medium": len([t for t in all_tasks if t.get("priority") == "medium"]),
+        "low": len([t for t in all_tasks if t.get("priority") == "low"])
+    }
+
+    # Estimated vs Actual hours (for completed tasks with estimates)
+    estimated_vs_actual = []
+    for task in completed_tasks:
+        if task.get("estimated_hours") and task.get("actual_hours"):
+            estimated_vs_actual.append({
+                "task_id": task["task_id"],
+                "title": task["title"],
+                "estimated": task["estimated_hours"],
+                "actual": task["actual_hours"],
+                "variance": task["actual_hours"] - task["estimated_hours"]
+            })
+
+    return {
+        "total_tasks": total_tasks,
+        "completed_tasks": len(completed_tasks),
+        "in_progress_tasks": len(in_progress_tasks),
+        "pending_tasks": len(pending_tasks),
+        "overdue_tasks": len(overdue_tasks),
+        "completion_rate": round(completion_rate, 2),
+        "avg_completion_time_hours": round(avg_completion_time, 2),
+        "priority_breakdown": priority_breakdown,
+        "estimated_vs_actual": estimated_vs_actual,
+        "overdue_task_details": overdue_tasks[:5]  # Return top 5 overdue
+    }
 
 # ==================== AI REPORTS ====================
 
@@ -720,10 +948,11 @@ Instructions:
 - Réponds en français
 """
 
-        # Call Claude
+        # Call Claude with meeting_id as session for conversation history
+        meeting_id = context.get("meeting_id", "default")
         chat = LlmChat(
             api_key=api_key,
-            session_id=f"assistant_{user['user_id']}_{datetime.now().timestamp()}",
+            session_id=f"assistant_meeting_{meeting_id}",  # Same session per meeting for continuity
             system_message="Tu es un assistant IA spécialisé dans la gestion de réunions professionnelles. Tu fournis des réponses claires, concises et actionnables en français."
         ).with_model("anthropic", "claude-sonnet-4-5-20250929")
 
