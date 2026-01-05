@@ -34,7 +34,8 @@ import { format, parseISO, isPast, isToday } from 'date-fns';
 import { fr } from 'date-fns/locale';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import TaskAnalytics from '@/components/TaskAnalytics';
-import { BarChart3, ListTodo } from 'lucide-react';
+import GoalTracker from '@/components/GoalTracker';
+import { BarChart3, ListTodo, Target } from 'lucide-react';
 
 export default function Tasks() {
   const [tasks, setTasks] = useState([]);
@@ -183,6 +184,10 @@ export default function Tasks() {
           <TabsTrigger value="analytics">
             <BarChart3 className="w-4 h-4 mr-2" />
             Analytics
+          </TabsTrigger>
+          <TabsTrigger value="goals">
+            <Target className="w-4 h-4 mr-2" />
+            Objectifs
           </TabsTrigger>
         </TabsList>
 
@@ -387,6 +392,10 @@ export default function Tasks() {
 
         <TabsContent value="analytics">
           <TaskAnalytics />
+        </TabsContent>
+
+        <TabsContent value="goals">
+          <GoalTracker />
         </TabsContent>
       </Tabs>
     </div>

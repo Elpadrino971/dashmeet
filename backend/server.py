@@ -76,6 +76,23 @@ class TaskActivity(BaseModel):
     comment: Optional[str] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+class Goal(BaseModel):
+    goal_id: str = Field(default_factory=lambda: f"goal_{uuid.uuid4().hex[:8]}")
+    user_id: str
+    user_email: str
+    title: str
+    description: Optional[str] = None
+    goal_type: str  # tasks_completed, meetings_held, tasks_on_time, completion_rate
+    period: str  # daily, weekly, monthly
+    target_value: float  # Objectif chiffré
+    current_value: float = 0.0  # Valeur actuelle
+    start_date: datetime
+    end_date: datetime
+    status: str = "in_progress"  # in_progress, completed, failed
+    is_validated: bool = False  # Coché par l'utilisateur
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = None
+
 class Meeting(BaseModel):
     meeting_id: str = Field(default_factory=lambda: f"mtg_{uuid.uuid4().hex[:8]}")
     title: str
@@ -152,6 +169,21 @@ class AssistantQueryRequest(BaseModel):
     query: str
     context: dict
     use_web_search: bool = False
+
+class GoalCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    goal_type: str  # tasks_completed, meetings_held, tasks_on_time, completion_rate
+    period: str  # daily, weekly, monthly
+    target_value: float
+    start_date: datetime
+    end_date: datetime
+
+class GoalUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    target_value: Optional[float] = None
+    is_validated: Optional[bool] = None
 
 # ==================== AUTH ENDPOINTS ====================
 
@@ -717,6 +749,212 @@ async def get_tasks_analytics(request: Request, meeting_id: Optional[str] = None
         "priority_breakdown": priority_breakdown,
         "estimated_vs_actual": estimated_vs_actual,
         "overdue_task_details": overdue_tasks[:5]  # Return top 5 overdue
+    }
+
+# ==================== GOALS ENDPOINTS ====================
+
+@api_router.get("/goals")
+async def get_goals(request: Request, period: Optional[str] = None):
+    """Get all goals for current user"""
+    user = await get_user_from_request(request)
+
+    query = {"user_email": user["email"]}
+    if period:
+        query["period"] = period
+
+    goals = await db.goals.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
+
+    # Update current_value for each goal based on actual data
+    for goal in goals:
+        goal["current_value"] = await calculate_goal_progress(user, goal)
+
+        # Auto-update status
+        if goal["current_value"] >= goal["target_value"]:
+            goal["status"] = "completed"
+        elif datetime.fromisoformat(goal["end_date"].replace('Z', '+00:00')) < datetime.now(timezone.utc):
+            goal["status"] = "failed"
+
+        # Update in DB
+        await db.goals.update_one(
+            {"goal_id": goal["goal_id"]},
+            {"$set": {
+                "current_value": goal["current_value"],
+                "status": goal["status"]
+            }}
+        )
+
+    return goals
+
+async def calculate_goal_progress(user: dict, goal: dict) -> float:
+    """Calculate current progress for a goal"""
+    start_date = datetime.fromisoformat(goal["start_date"].replace('Z', '+00:00'))
+    end_date = datetime.fromisoformat(goal["end_date"].replace('Z', '+00:00'))
+
+    goal_type = goal["goal_type"]
+
+    if goal_type == "tasks_completed":
+        # Count completed tasks in period
+        tasks = await db.tasks.find({
+            "assignee_email": user["email"],
+            "status": "completed",
+            "completed_at": {
+                "$gte": start_date.isoformat(),
+                "$lte": end_date.isoformat()
+            }
+        }, {"_id": 0}).to_list(1000)
+        return float(len(tasks))
+
+    elif goal_type == "meetings_held":
+        # Count completed meetings in period
+        meetings = await db.meetings.find({
+            "$or": [
+                {"organizer_id": user["user_id"]},
+                {"participants": user["email"]}
+            ],
+            "status": "completed",
+            "completed_at": {
+                "$gte": start_date.isoformat(),
+                "$lte": end_date.isoformat()
+            }
+        }, {"_id": 0}).to_list(1000)
+        return float(len(meetings))
+
+    elif goal_type == "tasks_on_time":
+        # Count tasks completed on time
+        tasks = await db.tasks.find({
+            "assignee_email": user["email"],
+            "status": "completed",
+            "completed_at": {
+                "$gte": start_date.isoformat(),
+                "$lte": end_date.isoformat()
+            }
+        }, {"_id": 0}).to_list(1000)
+
+        on_time_count = 0
+        for task in tasks:
+            if task.get("due_date") and task.get("completed_at"):
+                due = datetime.fromisoformat(task["due_date"].replace('Z', '+00:00'))
+                completed = datetime.fromisoformat(task["completed_at"].replace('Z', '+00:00'))
+                if completed <= due:
+                    on_time_count += 1
+        return float(on_time_count)
+
+    elif goal_type == "completion_rate":
+        # Calculate completion rate %
+        all_tasks = await db.tasks.find({
+            "assignee_email": user["email"],
+            "created_at": {
+                "$gte": start_date.isoformat(),
+                "$lte": end_date.isoformat()
+            }
+        }, {"_id": 0}).to_list(1000)
+
+        if len(all_tasks) == 0:
+            return 0.0
+
+        completed = len([t for t in all_tasks if t.get("status") == "completed"])
+        return round((completed / len(all_tasks)) * 100, 2)
+
+    return 0.0
+
+@api_router.post("/goals")
+async def create_goal(goal_data: GoalCreate, request: Request):
+    """Create a new goal"""
+    user = await get_user_from_request(request)
+
+    goal = Goal(
+        user_id=user["user_id"],
+        user_email=user["email"],
+        title=goal_data.title,
+        description=goal_data.description,
+        goal_type=goal_data.goal_type,
+        period=goal_data.period,
+        target_value=goal_data.target_value,
+        start_date=goal_data.start_date,
+        end_date=goal_data.end_date
+    )
+
+    goal_dict = goal.model_dump()
+    goal_dict["start_date"] = goal_dict["start_date"].isoformat()
+    goal_dict["end_date"] = goal_dict["end_date"].isoformat()
+    goal_dict["created_at"] = goal_dict["created_at"].isoformat()
+
+    await db.goals.insert_one(goal_dict)
+
+    return {"goal_id": goal.goal_id, "message": "Goal created"}
+
+@api_router.put("/goals/{goal_id}")
+async def update_goal(goal_id: str, goal_data: GoalUpdate, request: Request):
+    """Update a goal"""
+    user = await get_user_from_request(request)
+
+    update_data = {k: v for k, v in goal_data.model_dump().items() if v is not None}
+
+    if update_data:
+        await db.goals.update_one({"goal_id": goal_id}, {"$set": update_data})
+
+    return {"message": "Goal updated"}
+
+@api_router.post("/goals/{goal_id}/validate")
+async def validate_goal(goal_id: str, request: Request):
+    """Mark goal as validated (checked)"""
+    user = await get_user_from_request(request)
+
+    await db.goals.update_one(
+        {"goal_id": goal_id},
+        {"$set": {
+            "is_validated": True,
+            "completed_at": datetime.now(timezone.utc).isoformat()
+        }}
+    )
+
+    return {"message": "Goal validated"}
+
+@api_router.delete("/goals/{goal_id}")
+async def delete_goal(goal_id: str, request: Request):
+    """Delete a goal"""
+    user = await get_user_from_request(request)
+
+    await db.goals.delete_one({"goal_id": goal_id})
+    return {"message": "Goal deleted"}
+
+@api_router.get("/goals/analytics")
+async def get_goals_analytics(request: Request):
+    """Get goals analytics"""
+    user = await get_user_from_request(request)
+
+    all_goals = await db.goals.find({"user_email": user["email"]}, {"_id": 0}).to_list(1000)
+
+    total_goals = len(all_goals)
+    completed_goals = len([g for g in all_goals if g.get("status") == "completed"])
+    failed_goals = len([g for g in all_goals if g.get("status") == "failed"])
+    in_progress_goals = len([g for g in all_goals if g.get("status") == "in_progress"])
+
+    # Success rate
+    success_rate = (completed_goals / total_goals * 100) if total_goals > 0 else 0
+
+    # Average variance (écart réel vs projeté)
+    variances = []
+    for goal in all_goals:
+        if goal.get("current_value") is not None and goal.get("target_value"):
+            variance = goal["current_value"] - goal["target_value"]
+            variance_pct = (variance / goal["target_value"] * 100) if goal["target_value"] > 0 else 0
+            variances.append({
+                "goal_id": goal["goal_id"],
+                "title": goal["title"],
+                "target": goal["target_value"],
+                "current": goal["current_value"],
+                "variance": variance,
+                "variance_pct": round(variance_pct, 2)
+            })
+
+    return {
+        "total_goals": total_goals,
+        "completed_goals": completed_goals,
+        "failed_goals": failed_goals,
+        "in_progress_goals": in_progress_goals,
+        "success_rate": round(success_rate, 2),
+        "variances": variances
     }
 
 # ==================== AI REPORTS ====================

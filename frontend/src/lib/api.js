@@ -165,4 +165,38 @@ export const statsAPI = {
   }
 };
 
+// Goals
+export const goalsAPI = {
+  getAll: async (period = null) => {
+    const params = period ? { period } : {};
+    const res = await api.get('/goals', { params });
+    return res.data;
+  },
+
+  create: async (data) => {
+    const res = await api.post('/goals', data);
+    return res.data;
+  },
+
+  update: async (id, data) => {
+    const res = await api.put(`/goals/${id}`, data);
+    return res.data;
+  },
+
+  delete: async (id) => {
+    const res = await api.delete(`/goals/${id}`);
+    return res.data;
+  },
+
+  validate: async (id) => {
+    const res = await api.post(`/goals/${id}/validate`);
+    return res.data;
+  },
+
+  getAnalytics: async () => {
+    const res = await api.get('/goals/analytics');
+    return res.data;
+  }
+};
+
 export default api;
